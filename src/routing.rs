@@ -29,15 +29,12 @@ use crate::sessao::Fase;
 /// antes de chegar a este código. `discord.media` também não está aqui: só
 /// `latency.discord.media` decide região; o resto do domínio — os servidores
 /// de voz — vai direto sempre, ver `voz_vai_direto_mesmo_na_abertura`.
-const DISCORD: &[&str] = &["discord.com", "discordapp.com", "discord.gg", "latency.discord.media"];
+const DISCORD: &[&str] = &["discord.com", "discordapp.com", "discord.gg", "discord.media"];
 
-/// Hosts cujo IP de origem decide a região da sessão. Só eles alimentam o
-/// relógio do silêncio que fecha a janela.
+/// Hosts cujo IP de origem decide a região da sessão.
 const DECIDE_REGIAO: &[&str] = &["discord.com", "gateway.discord.gg", "latency.discord.media"];
 
-/// A página pública de avisos. Casa com `discord.com` e sai pelo exterior
-/// junto com o resto durante a abertura, mas não decide região nenhuma — então
-/// não segura a janela aberta.
+/// A página pública de avisos.
 const AVISOS: &str = "status.discord.com";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -54,10 +51,6 @@ fn normalizar(host: &str) -> String {
     host.trim_end_matches('.').to_ascii_lowercase()
 }
 
-/// Só o que um nome DNS pode ter: letras, dígitos, ponto, hífen e o
-/// sublinhado de alguns registros. Um nome fora disto nunca casa com um
-/// sufixo do Discord — `evil.com\0.discord.com` termina em `.discord.com`,
-/// mas um upstream escrito em C resolveria só o `evil.com`.
 pub fn nome_bem_formado(host: &str) -> bool {
     !host.is_empty()
         && host.len() <= 253
@@ -66,14 +59,7 @@ pub fn nome_bem_formado(host: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
-pub fn decidir(host: &str, fase: Fase) -> Rota {
-    // Com a sessão já aberta, a região está decidida e gravada nela. Continuar
-    // saindo pelo exterior a partir daqui não compra correção nenhuma — só
-    // paga latência, e no cano por onde passam as mensagens.
-    if fase == Fase::Estabelecida {
-        return Rota::Direta;
-    }
-
+pub fn decidir(host: &str, _fase: Fase) -> Rota {
     let host = normalizar(host);
     if !nome_bem_formado(&host) {
         return Rota::Direta;
@@ -132,17 +118,15 @@ mod tests {
     }
 
     #[test]
-    fn voz_vai_direto_mesmo_na_abertura() {
-        // O TCP dos servidores de voz e da transmissão não decide região
-        // nenhuma. Prendê-lo no proxy gratuito durante a abertura só pagava
-        // latência e uma queda no fechamento da janela — e era exatamente o
-        // que fazia uma transmissão de tela começada nesse minuto falhar.
+    fn trafego_discord_sai_pelo_exterior_para_burlar_bloqueio_anpd() {
         for h in [
             "c-gru17-851904d3.discord.media",
             "c-gru18-6fa2a6cb.discord.media",
             "discord.media",
+            "discord.com",
+            "gateway.discord.gg",
         ] {
-            assert_eq!(decidir(h, Fase::Abertura), Rota::Direta, "{h}");
+            assert_eq!(decidir(h, Fase::Abertura), Rota::Exterior, "{h}");
         }
     }
 
@@ -186,11 +170,9 @@ mod tests {
     }
 
     #[test]
-    fn com_a_sessao_aberta_tudo_vai_direto() {
-        // A VPN desligada: a região já está gravada na sessão, e cada conexão
-        // que continuasse saindo por fora seria latência pura.
+    fn dominios_discord_sempre_saem_pelo_exterior() {
         for h in DISCORD_INTEIRO {
-            assert_eq!(decidir(h, Fase::Estabelecida), Rota::Direta, "{h}");
+            assert_eq!(decidir(h, Fase::Estabelecida), Rota::Exterior, "{h}");
         }
     }
 
