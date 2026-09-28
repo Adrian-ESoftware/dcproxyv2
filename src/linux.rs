@@ -47,8 +47,20 @@ fn caminho_discord_backup() -> PathBuf {
     pasta_dados_local().join("applications").join("discord.desktop.fol_backup")
 }
 
+fn caminho_vesktop_desktop() -> PathBuf {
+    pasta_dados_local().join("applications").join("vesktop.desktop")
+}
+
+fn caminho_vesktop_backup() -> PathBuf {
+    pasta_dados_local().join("applications").join("vesktop.desktop.fol_backup")
+}
+
 fn caminho_wrapper_discord() -> PathBuf {
     pasta_bin_local().join("discord")
+}
+
+fn caminho_wrapper_vesktop() -> PathBuf {
+    pasta_bin_local().join("vesktop")
 }
 
 fn caminho_pac_marcador() -> PathBuf {
@@ -61,11 +73,13 @@ pub fn ativar_pac(url: &str) -> Result<()> {
     let _ = fs::create_dir_all(crate::pasta_dados());
     let _ = fs::write(caminho_pac_marcador(), url);
 
-    // 1. Configurar lançador discord.desktop do usuário
-    configurar_discord_desktop(url)?;
+    // 1. Configurar Discord oficial
+    let _ = configurar_desktop("discord", "/usr/share/applications/discord.desktop", &caminho_discord_desktop(), &caminho_discord_backup(), "/usr/bin/discord", url);
+    let _ = configurar_wrapper(&caminho_wrapper_discord(), "/usr/bin/discord", url);
 
-    // 2. Configurar wrapper em ~/.local/bin/discord
-    configurar_wrapper_discord(url)?;
+    // 2. Configurar Vesktop
+    let _ = configurar_desktop("vesktop", "/usr/share/applications/vesktop.desktop", &caminho_vesktop_desktop(), &caminho_vesktop_backup(), "/usr/bin/vesktop", url);
+    let _ = configurar_wrapper(&caminho_wrapper_vesktop(), "/usr/bin/vesktop", url);
 
     // 3. Se estiver no KDE Plasma (kwriteconfig6 ou kwriteconfig5)
     configurar_kde_proxy(url);
@@ -79,16 +93,17 @@ pub fn ativar_pac(url: &str) -> Result<()> {
 pub fn desativar_pac() -> Result<()> {
     let _ = fs::remove_file(caminho_pac_marcador());
 
-    // 1. Restaurar ou remover discord.desktop
-    restaurar_discord_desktop()?;
+    // 1. Restaurar ou remover discord e vesktop
+    restaurar_desktop(&caminho_discord_desktop(), &caminho_discord_backup());
+    remover_wrapper(&caminho_wrapper_discord());
 
-    // 2. Remover wrapper em ~/.local/bin/discord
-    remover_wrapper_discord()?;
+    restaurar_desktop(&caminho_vesktop_desktop(), &caminho_vesktop_backup());
+    remover_wrapper(&caminho_wrapper_vesktop());
 
-    // 3. Desativar KDE proxy
+    // 2. Desativar KDE proxy
     desativar_kde_proxy();
 
-    // 4. Desativar GNOME proxy
+    // 3. Desativar GNOME proxy
     desativar_gnome_proxy();
 
     Ok(())
@@ -101,40 +116,49 @@ pub fn pac_ativo(url: &str) -> bool {
         }
     }
 
-    if let Ok(conteudo) = fs::read_to_string(caminho_discord_desktop()) {
-        if conteudo.contains(&format!("--proxy-pac-url={url}")) {
-            return true;
+    for desk in [&caminho_discord_desktop(), &caminho_vesktop_desktop()] {
+        if let Ok(conteudo) = fs::read_to_string(desk) {
+            if conteudo.contains(&format!("--proxy-pac-url={url}")) {
+                return true;
+            }
         }
     }
 
     false
 }
 
-fn configurar_discord_desktop(url: &str) -> Result<()> {
-    let destino = caminho_discord_desktop();
+fn configurar_desktop(
+    nome_app: &str,
+    caminho_origem: &str,
+    destino: &Path,
+    backup: &Path,
+    binario_padrao: &str,
+    url: &str,
+) -> Result<()> {
     let pasta_apps = destino.parent().context("caminho de applications inválido")?;
     fs::create_dir_all(pasta_apps)?;
 
-    let origem_sistema = Path::new("/usr/share/applications/discord.desktop");
+    let origem_sistema = Path::new(caminho_origem);
     let conteudo_base = if destino.exists() {
-        let atual = fs::read_to_string(&destino)?;
-        if !atual.contains("# Managed by FOL-discord") && !caminho_discord_backup().exists() {
-            let _ = fs::copy(&destino, caminho_discord_backup());
+        let atual = fs::read_to_string(destino)?;
+        if !atual.contains("# Managed by FOL-discord") && !backup.exists() {
+            let _ = fs::copy(destino, backup);
         }
         atual
     } else if origem_sistema.exists() {
         fs::read_to_string(origem_sistema)?
     } else {
-        // Modelo padrão caso não exista arquivo desktop do Discord no sistema
-        "[Desktop Entry]\n\
-         Name=Discord\n\
-         StartupWMClass=discord\n\
-         Comment=All-in-one voice and text chat for gamers\n\
-         GenericName=Internet Messenger\n\
-         Exec=/usr/bin/discord --url -- %u\n\
-         Icon=discord\n\
-         Type=Application\n\
-         Categories=Network;InstantMessaging;\n".to_string()
+        format!(
+            "[Desktop Entry]\n\
+             Name={nome_app}\n\
+             StartupWMClass={nome_app}\n\
+             Comment=Cliente Discord\n\
+             GenericName=Internet Messenger\n\
+             Exec={binario_padrao} %U\n\
+             Icon={nome_app}\n\
+             Type=Application\n\
+             Categories=Network;InstantMessaging;\n"
+        )
     };
 
     let flag = format!("--enable-features=WebRTCPipeWireCapturer --proxy-pac-url={url}");
@@ -150,11 +174,9 @@ fn configurar_discord_desktop(url: &str) -> Result<()> {
 
         if linha.starts_with("Exec=") {
             let mut partes: Vec<&str> = linha.split_whitespace().collect();
-            // Remove flag de proxy antiga se já existir
             partes.retain(|p| !p.starts_with("--proxy-pac-url=") && !p.starts_with("--enable-features="));
-            // Insere a nova flag logo após o comando executável (partes[0])
             if partes.is_empty() {
-                linhas_modificadas.push(format!("Exec=/usr/bin/discord {flag}"));
+                linhas_modificadas.push(format!("Exec={binario_padrao} {flag}"));
             } else {
                 let exec = partes[0];
                 let resto = &partes[1..];
@@ -175,25 +197,20 @@ fn configurar_discord_desktop(url: &str) -> Result<()> {
 
     let mut novo_conteudo = linhas_modificadas.join("\n");
     novo_conteudo.push('\n');
-    fs::write(&destino, novo_conteudo)?;
+    fs::write(destino, novo_conteudo)?;
 
-    // Atualiza base de dados desktop se o comando existir
     let _ = Command::new("update-desktop-database").arg(pasta_apps).output();
-
     Ok(())
 }
 
-fn restaurar_discord_desktop() -> Result<()> {
-    let destino = caminho_discord_desktop();
-    let backup = caminho_discord_backup();
-
+fn restaurar_desktop(destino: &Path, backup: &Path) {
     if backup.exists() {
-        let _ = fs::copy(&backup, &destino);
-        let _ = fs::remove_file(&backup);
+        let _ = fs::copy(backup, destino);
+        let _ = fs::remove_file(backup);
     } else if destino.exists() {
-        if let Ok(conteudo) = fs::read_to_string(&destino) {
+        if let Ok(conteudo) = fs::read_to_string(destino) {
             if conteudo.contains("# Managed by FOL-discord") {
-                let _ = fs::remove_file(&destino);
+                let _ = fs::remove_file(destino);
             }
         }
     }
@@ -201,12 +218,9 @@ fn restaurar_discord_desktop() -> Result<()> {
     if let Some(pasta_apps) = destino.parent() {
         let _ = Command::new("update-desktop-database").arg(pasta_apps).output();
     }
-
-    Ok(())
 }
 
-fn configurar_wrapper_discord(url: &str) -> Result<()> {
-    let destino = caminho_wrapper_discord();
+fn configurar_wrapper(destino: &Path, real_bin: &str, url: &str) -> Result<()> {
     if let Some(p) = destino.parent() {
         fs::create_dir_all(p)?;
     }
@@ -214,31 +228,25 @@ fn configurar_wrapper_discord(url: &str) -> Result<()> {
     let conteudo = format!(
         "#!/bin/sh\n\
          # Managed by FOL-discord\n\
-         REAL_DISCORD=\"/usr/bin/discord\"\n\
-         if [ ! -x \"$REAL_DISCORD\" ]; then\n\
-             REAL_DISCORD=\"/opt/discord/Discord\"\n\
-         fi\n\
-         exec \"$REAL_DISCORD\" --enable-features=WebRTCPipeWireCapturer --proxy-pac-url=\"{url}\" \"$@\"\n"
+         exec \"{real_bin}\" --enable-features=WebRTCPipeWireCapturer --proxy-pac-url=\"{url}\" \"$@\"\n"
     );
 
-    fs::write(&destino, conteudo)?;
-    let mut perms = fs::metadata(&destino)?.permissions();
+    fs::write(destino, conteudo)?;
+    let mut perms = fs::metadata(destino)?.permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&destino, perms)?;
+    fs::set_permissions(destino, perms)?;
 
     Ok(())
 }
 
-fn remover_wrapper_discord() -> Result<()> {
-    let destino = caminho_wrapper_discord();
+fn remover_wrapper(destino: &Path) {
     if destino.exists() {
-        if let Ok(conteudo) = fs::read_to_string(&destino) {
+        if let Ok(conteudo) = fs::read_to_string(destino) {
             if conteudo.contains("# Managed by FOL-discord") {
                 let _ = fs::remove_file(destino);
             }
         }
     }
-    Ok(())
 }
 
 fn configurar_kde_proxy(url: &str) {

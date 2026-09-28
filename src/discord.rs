@@ -5,14 +5,23 @@ use std::{path::PathBuf, process::Command, time::Duration};
 
 use crate::{processos::Processo, sessao::Identidade};
 
-const IMAGEM: &str = "discord";
+const IMAGENS: &[&str] = &["discord", "vesktop"];
 
-/// Lançador do Discord no Linux.
+/// Lançador do Discord ou Vesktop no Linux.
 pub fn lancador() -> Option<PathBuf> {
+    if crate::processos::esta_rodando("vesktop") {
+        let v = PathBuf::from("/usr/bin/vesktop");
+        if v.exists() {
+            return Some(v);
+        }
+    }
+
     let caminhos = [
+        "/usr/bin/vesktop",
         "/usr/bin/discord",
         "/usr/bin/Discord",
         "/opt/discord/Discord",
+        "/usr/local/bin/vesktop",
         "/usr/local/bin/discord",
     ];
     for c in caminhos {
@@ -23,6 +32,10 @@ pub fn lancador() -> Option<PathBuf> {
     }
     if let Ok(caminho) = std::env::var("PATH") {
         for p in std::env::split_paths(&caminho) {
+            let v = p.join("vesktop");
+            if v.is_file() {
+                return Some(v);
+            }
             let d = p.join("discord");
             if d.is_file() {
                 return Some(d);
@@ -33,18 +46,16 @@ pub fn lancador() -> Option<PathBuf> {
 }
 
 pub fn esta_rodando() -> bool {
-    crate::processos::esta_rodando(IMAGEM)
+    IMAGENS.iter().any(|img| crate::processos::esta_rodando(img))
 }
 
-/// O processo principal do Discord no ar, com a hora em que nasceu.
-///
-/// O Discord roda vários processos no Linux (principal, GPU, renderizadores, etc.).
-/// O principal é o único cujo pai não é outro processo do Discord.
+/// O processo principal do Discord ou Vesktop no ar, com a hora em que nasceu.
 pub fn principal() -> Option<Identidade> {
-    principal_entre(
-        &crate::processos::processos_por_nome(IMAGEM),
-        crate::processos::criado_em,
-    )
+    let mut processos = Vec::new();
+    for img in IMAGENS {
+        processos.extend(crate::processos::processos_por_nome(img));
+    }
+    principal_entre(&processos, crate::processos::criado_em)
 }
 
 fn principal_entre(
@@ -79,11 +90,13 @@ fn principal_entre(
 }
 
 fn encerrar() {
-    crate::processos::encerrar_por_nome(IMAGEM);
+    for img in IMAGENS {
+        crate::processos::encerrar_por_nome(img);
+    }
     std::thread::sleep(Duration::from_millis(500));
 }
 
-/// Fecha e reabre o Discord.
+/// Fecha e reabre o cliente.
 pub fn reiniciar() -> Result<bool> {
     let Some(lancador) = lancador() else {
         return Ok(false);
@@ -94,6 +107,7 @@ pub fn reiniciar() -> Result<bool> {
     }
 
     Command::new(lancador)
+        .arg("--enable-features=WebRTCPipeWireCapturer")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
