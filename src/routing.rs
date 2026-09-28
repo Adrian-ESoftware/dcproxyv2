@@ -59,10 +59,7 @@ pub fn nome_bem_formado(host: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
-pub fn decidir(host: &str, fase: Fase) -> Rota {
-    if fase == Fase::Estabelecida {
-        return Rota::Direta;
-    }
+pub fn decidir(host: &str, _fase: Fase) -> Rota {
 
     let host = normalizar(host);
     if !nome_bem_formado(&host) {
@@ -172,9 +169,9 @@ mod tests {
     }
 
     #[test]
-    fn com_a_sessao_aberta_tudo_vai_direto() {
+    fn com_a_sessao_aberta_discord_continua_por_fora() {
         for h in DISCORD_INTEIRO {
-            assert_eq!(decidir(h, Fase::Estabelecida), Rota::Direta, "{h}");
+            assert_eq!(decidir(h, Fase::Estabelecida), Rota::Exterior, "{h}");
         }
     }
 
