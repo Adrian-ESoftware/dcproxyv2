@@ -14,10 +14,13 @@ use tokio::{
 pub fn texto(porta_socks: u16) -> String {
     format!(
         r#"function FindProxyForURL(url, host) {{
-  if (dnsDomainIs(host, ".discord.com")      || host == "discord.com"      ||
-      dnsDomainIs(host, ".discord.gg")       || host == "discord.gg"       ||
-      dnsDomainIs(host, ".discord.media")    ||
-      dnsDomainIs(host, ".discordapp.com")   || host == "discordapp.com")
+  if (host == "latency.discord.media")
+    return "SOCKS5 127.0.0.1:{porta_socks}";
+  if (dnsDomainIs(host, ".discord.media")     || host == "discord.media")
+    return "DIRECT";
+  if (dnsDomainIs(host, ".discord.com")       || host == "discord.com"       ||
+      dnsDomainIs(host, ".discord.gg")        || host == "discord.gg"        ||
+      dnsDomainIs(host, ".discordapp.com")    || host == "discordapp.com")
     return "SOCKS5 127.0.0.1:{porta_socks}";
   return "DIRECT";
 }}
@@ -65,7 +68,7 @@ mod tests {
         let p = texto(9250);
         assert!(p.contains("SOCKS5 127.0.0.1:9250"));
         assert!(p.contains(".discord.com"));
-        assert!(p.contains(".discord.media"));
+        assert!(p.contains("latency.discord.media"));
         assert!(p.trim_end().ends_with('}'));
         assert!(p.contains("return \"DIRECT\""));
     }

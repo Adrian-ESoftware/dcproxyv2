@@ -29,7 +29,7 @@ use crate::sessao::Fase;
 /// antes de chegar a este código. `discord.media` também não está aqui: só
 /// `latency.discord.media` decide região; o resto do domínio — os servidores
 /// de voz — vai direto sempre, ver `voz_vai_direto_mesmo_na_abertura`.
-const DISCORD: &[&str] = &["discord.com", "discordapp.com", "discord.gg", "discord.media"];
+const DISCORD: &[&str] = &["discord.com", "discordapp.com", "discord.gg", "latency.discord.media"];
 
 /// Hosts cujo IP de origem decide a região da sessão.
 const DECIDE_REGIAO: &[&str] = &["discord.com", "gateway.discord.gg", "latency.discord.media"];
@@ -59,7 +59,11 @@ pub fn nome_bem_formado(host: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'))
 }
 
-pub fn decidir(host: &str, _fase: Fase) -> Rota {
+pub fn decidir(host: &str, fase: Fase) -> Rota {
+    if fase == Fase::Estabelecida {
+        return Rota::Direta;
+    }
+
     let host = normalizar(host);
     if !nome_bem_formado(&host) {
         return Rota::Direta;
@@ -118,15 +122,13 @@ mod tests {
     }
 
     #[test]
-    fn trafego_discord_sai_pelo_exterior_para_burlar_bloqueio_anpd() {
+    fn voz_vai_direto_mesmo_na_abertura() {
         for h in [
             "c-gru17-851904d3.discord.media",
             "c-gru18-6fa2a6cb.discord.media",
             "discord.media",
-            "discord.com",
-            "gateway.discord.gg",
         ] {
-            assert_eq!(decidir(h, Fase::Abertura), Rota::Exterior, "{h}");
+            assert_eq!(decidir(h, Fase::Abertura), Rota::Direta, "{h}");
         }
     }
 
@@ -170,9 +172,9 @@ mod tests {
     }
 
     #[test]
-    fn dominios_discord_sempre_saem_pelo_exterior() {
+    fn com_a_sessao_aberta_tudo_vai_direto() {
         for h in DISCORD_INTEIRO {
-            assert_eq!(decidir(h, Fase::Estabelecida), Rota::Exterior, "{h}");
+            assert_eq!(decidir(h, Fase::Estabelecida), Rota::Direta, "{h}");
         }
     }
 
