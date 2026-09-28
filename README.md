@@ -21,7 +21,14 @@ A solução manual comum era abrir o Discord com VPN e desligar depois. Este pro
 
 ## Como Instalar no Linux
 
-### 1. Clonar e Instalar
+Não precisa de Rust, Cargo, compilador ou permissões de administrador/sudo. O binário já vai pronto.
+
+### Opção 1: Comando único (Mais rápido)
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/Adrian-ESoftware/dcproxyv2/main/install.sh)"
+```
+
+### Opção 2: Clonando o repositório
 ```bash
 git clone https://github.com/Adrian-ESoftware/dcproxyv2.git
 cd dcproxyv2
@@ -29,7 +36,7 @@ cd dcproxyv2
 ```
 
 O script:
-* Compila o binário otimizado (se ainda não compilado);
+* Utiliza o binário pré-compilado;
 * Instala no diretório do usuário em `~/.local/share/fol-discord/`;
 * Adiciona o comando `fol-discord` em `~/.local/bin/`;
 * Configura inicialização automática via `systemd --user` e XDG Autostart;
