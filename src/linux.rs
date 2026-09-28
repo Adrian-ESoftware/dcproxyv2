@@ -137,7 +137,7 @@ fn configurar_discord_desktop(url: &str) -> Result<()> {
          Categories=Network;InstantMessaging;\n".to_string()
     };
 
-    let flag = format!("--proxy-pac-url={url}");
+    let flag = format!("--enable-features=WebRTCPipeWireCapturer --proxy-pac-url={url}");
     let mut linhas_modificadas = Vec::new();
     let mut tem_marcador = false;
 
@@ -151,7 +151,7 @@ fn configurar_discord_desktop(url: &str) -> Result<()> {
         if linha.starts_with("Exec=") {
             let mut partes: Vec<&str> = linha.split_whitespace().collect();
             // Remove flag de proxy antiga se já existir
-            partes.retain(|p| !p.starts_with("--proxy-pac-url="));
+            partes.retain(|p| !p.starts_with("--proxy-pac-url=") && !p.starts_with("--enable-features="));
             // Insere a nova flag logo após o comando executável (partes[0])
             if partes.is_empty() {
                 linhas_modificadas.push(format!("Exec=/usr/bin/discord {flag}"));
@@ -218,7 +218,7 @@ fn configurar_wrapper_discord(url: &str) -> Result<()> {
          if [ ! -x \"$REAL_DISCORD\" ]; then\n\
              REAL_DISCORD=\"/opt/discord/Discord\"\n\
          fi\n\
-         exec \"$REAL_DISCORD\" --proxy-pac-url=\"{url}\" \"$@\"\n"
+         exec \"$REAL_DISCORD\" --enable-features=WebRTCPipeWireCapturer --proxy-pac-url=\"{url}\" \"$@\"\n"
     );
 
     fs::write(&destino, conteudo)?;
