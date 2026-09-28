@@ -1,169 +1,108 @@
-//! Encontra e encerra processos pela API do Windows, sem chamar utilitário externo.
-//!
-//! O caminho óbvio seria `tasklist` e `taskkill`. Os dois funcionam, e os dois
-//! são exatamente o que um antivírus observa numa detonação: um processo sem
-//! janela que enumera a lista de processos e mata um programa de terceiros por
-//! força bruta. Não é o que este programa faz — ele fecha e reabre o Discord,
-//! e encerra cópias antigas de si mesmo — mas é o que a heurística vê.
-//!
-//! Falar direto com a API custa o mesmo, tira dois binários do sistema da
-//! árvore de processos e ainda corrige um defeito real: o `tasklist` era lido
-//! pela saída em texto, que muda com o idioma do Windows.
+//! Encontra e encerra processos no Linux via /proc e sinais POSIX.
 
-/// Um processo visto na lista do Windows: quem ele é e quem o criou. O pai é
-/// o PID que o Windows anotou na criação; se esse pai já morreu, o número
-/// pode ter sido reaproveitado por outro programa qualquer.
+use std::{fs, path::Path, time::Duration};
+
+/// Um processo visto na árvore do Linux: quem ele é e quem o criou.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Processo {
     pub pid: u32,
     pub pai: u32,
 }
 
-#[cfg(windows)]
-mod imp {
-    use std::os::windows::ffi::OsStrExt;
-
-    use windows_sys::Win32::{
-        Foundation::{CloseHandle, FILETIME, INVALID_HANDLE_VALUE},
-        Storage::FileSystem::SYNCHRONIZE,
-        System::{
-            Diagnostics::ToolHelp::{
-                CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
-                TH32CS_SNAPPROCESS,
-            },
-            Threading::{
-                GetProcessTimes, OpenProcess, TerminateProcess, WaitForSingleObject,
-                PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
-            },
-        },
+/// Todos os processos cujo nome casa com `nome`, sem diferenciar maiúsculas/minúsculas.
+pub fn processos_por_nome(nome: &str) -> Vec<Processo> {
+    let mut achados = Vec::new();
+    let Ok(entradas) = fs::read_dir("/proc") else {
+        return achados;
     };
 
-    use super::Processo;
+    for entrada in entradas.flatten() {
+        let Ok(nome_arquivo) = entrada.file_name().into_string() else {
+            continue;
+        };
+        let Ok(pid) = nome_arquivo.parse::<u32>() else {
+            continue;
+        };
 
-    /// Quanto esperar cada processo morrer de fato. O `taskkill` que estava
-    /// aqui antes não esperava nada — quem chamava dormia três segundos e
-    /// torcia. Esperar pelo handle acerta sempre e costuma voltar bem antes.
-    const ESPERA_MS: u32 = 5_000;
+        let caminho_stat = format!("/proc/{pid}/stat");
+        let Ok(stat) = fs::read_to_string(&caminho_stat) else {
+            continue;
+        };
 
-    /// Todos os processos cujo nome de imagem casa com `nome`, sem diferenciar
-    /// maiúsculas — é assim que o Windows compara nome de executável.
-    ///
-    /// Volta vazio quando o retrato da lista falha, o que acontece de vez em
-    /// quando sob carga. Quem depende de "não há nenhum" precisa tolerar isso.
-    pub fn processos_por_nome(nome: &str) -> Vec<Processo> {
-        let procurado: Vec<u16> = std::ffi::OsStr::new(nome).encode_wide().collect();
-        let mut achados = Vec::new();
-
-        // SAFETY: o snapshot é fechado em todos os caminhos de saída, e a
-        // entrada tem `dwSize` preenchido como a API exige.
-        unsafe {
-            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-            if snapshot == INVALID_HANDLE_VALUE {
-                return achados;
-            }
-
-            let mut entrada: PROCESSENTRY32W = std::mem::zeroed();
-            entrada.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
-
-            if Process32FirstW(snapshot, &mut entrada) != 0 {
-                loop {
-                    if mesmo_nome(&entrada.szExeFile, &procurado) {
-                        achados.push(Processo {
-                            pid: entrada.th32ProcessID,
-                            pai: entrada.th32ParentProcessID,
-                        });
-                    }
-                    if Process32NextW(snapshot, &mut entrada) == 0 {
-                        break;
-                    }
-                }
-            }
-
-            CloseHandle(snapshot);
+        let Some(idx_abertura) = stat.find('(') else {
+            continue;
+        };
+        let Some(idx_fechamento) = stat.rfind(')') else {
+            continue;
+        };
+        if idx_abertura >= idx_fechamento {
+            continue;
         }
 
-        achados
-    }
+        let comm = &stat[idx_abertura + 1..idx_fechamento];
+        let nome_limpo = nome.trim_end_matches(".exe");
+        if !comm.eq_ignore_ascii_case(nome) && !comm.eq_ignore_ascii_case(nome_limpo) {
+            continue;
+        }
 
-    /// Hora em que o processo nasceu, como o Windows a guarda: centenas de
-    /// nanossegundos desde 1601. `None` se ele já sumiu ou não deixa
-    /// perguntar — e aí quem chama se vira só com o PID.
-    pub fn criado_em(pid: u32) -> Option<u64> {
-        // SAFETY: o handle é fechado logo abaixo, e só é usado quando a
-        // abertura devolveu algo não nulo. As quatro estruturas são
-        // preenchidas pela API antes de serem lidas.
-        unsafe {
-            let processo = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-            if processo.is_null() {
-                return None;
+        let resto = stat[idx_fechamento + 1..].trim();
+        let mut partes = resto.split_whitespace();
+        // partes[0] é o estado (ex: 'S', 'R')
+        // partes[1] é o ppid
+        let _estado = partes.next();
+        if let Some(ppid_str) = partes.next() {
+            if let Ok(pai) = ppid_str.parse::<u32>() {
+                achados.push(Processo { pid, pai });
             }
-            let mut criacao: FILETIME = std::mem::zeroed();
-            let mut saida: FILETIME = std::mem::zeroed();
-            let mut nucleo: FILETIME = std::mem::zeroed();
-            let mut usuario: FILETIME = std::mem::zeroed();
-            let ok = GetProcessTimes(processo, &mut criacao, &mut saida, &mut nucleo, &mut usuario);
-            CloseHandle(processo);
-            (ok != 0).then(|| {
-                (u64::from(criacao.dwHighDateTime) << 32) | u64::from(criacao.dwLowDateTime)
-            })
         }
     }
 
-    /// Encerra cada PID e espera ele sair. Falha individual é silenciosa de
-    /// propósito: o processo pode ter morrido sozinho no meio do caminho, ou
-    /// pertencer a outra sessão — nenhum dos dois é motivo para abortar o resto.
-    pub fn encerrar_todos(pids: &[u32]) {
-        for pid in pids {
-            // SAFETY: o handle é fechado logo abaixo, e só é usado quando a
-            // abertura devolveu algo não nulo.
+    achados
+}
+
+/// Hora em que o processo nasceu, medido em jiffies desde o boot do sistema (campo starttime).
+/// Imutável e previne colisão caso um PID seja reaproveitado.
+pub fn criado_em(pid: u32) -> Option<u64> {
+    let caminho_stat = format!("/proc/{pid}/stat");
+    let stat = fs::read_to_string(&caminho_stat).ok()?;
+    let idx_fechamento = stat.rfind(')')?;
+    let resto = stat[idx_fechamento + 1..].trim();
+    let mut partes = resto.split_whitespace();
+    // Campo 19 após `)` corresponde ao starttime (campo 22 em /proc/pid/stat)
+    partes.nth(19)?.parse::<u64>().ok()
+}
+
+/// Encerra cada PID via SIGTERM, aguarda até 5s e aplica SIGKILL caso ainda reste algum processo.
+pub fn encerrar_todos(pids: &[u32]) {
+    for pid in pids {
+        unsafe {
+            libc::kill(*pid as i32, libc::SIGTERM);
+        }
+    }
+
+    let limite = Duration::from_millis(5000);
+    let passo = Duration::from_millis(100);
+    let mut decorrido = Duration::ZERO;
+
+    while decorrido < limite {
+        let ainda_vivos = pids
+            .iter()
+            .any(|pid| Path::new(&format!("/proc/{pid}")).exists());
+        if !ainda_vivos {
+            return;
+        }
+        std::thread::sleep(passo);
+        decorrido += passo;
+    }
+
+    for pid in pids {
+        if Path::new(&format!("/proc/{pid}")).exists() {
             unsafe {
-                let processo = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, 0, *pid);
-                if processo.is_null() {
-                    continue;
-                }
-                TerminateProcess(processo, 1);
-                WaitForSingleObject(processo, ESPERA_MS);
-                CloseHandle(processo);
+                libc::kill(*pid as i32, libc::SIGKILL);
             }
         }
     }
-
-    /// `szExeFile` é um buffer fixo terminado em NUL; comparar o buffer inteiro
-    /// acharia lixo depois do nome.
-    fn mesmo_nome(bruto: &[u16; 260], procurado: &[u16]) -> bool {
-        let fim = bruto.iter().position(|c| *c == 0).unwrap_or(bruto.len());
-        let nome = &bruto[..fim];
-        nome.len() == procurado.len()
-            && nome
-                .iter()
-                .zip(procurado)
-                .all(|(a, b)| caixa_baixa(*a) == caixa_baixa(*b))
-    }
-
-    fn caixa_baixa(c: u16) -> u16 {
-        match u8::try_from(c) {
-            Ok(b) => u16::from(b.to_ascii_lowercase()),
-            Err(_) => c,
-        }
-    }
 }
-
-#[cfg(not(windows))]
-mod imp {
-    use super::Processo;
-
-    pub fn processos_por_nome(_nome: &str) -> Vec<Processo> {
-        Vec::new()
-    }
-
-    pub fn criado_em(_pid: u32) -> Option<u64> {
-        None
-    }
-
-    pub fn encerrar_todos(_pids: &[u32]) {}
-}
-
-pub use imp::{criado_em, encerrar_todos, processos_por_nome};
 
 /// Só os PIDs, para quem não se importa com a árvore.
 pub fn pids_por_nome(nome: &str) -> Vec<u32> {

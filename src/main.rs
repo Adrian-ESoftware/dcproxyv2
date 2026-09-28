@@ -1,4 +1,4 @@
-//! fol-discord — corrige o problema do Discord no Brasil.
+//! fol-discord — corrige o problema do Discord no Brasil (Linux).
 //!
 //! O Discord decide a região da sua sessão pelo IP que enxerga na abertura.
 //! Em vários provedores brasileiros essa decisão sai errada e a transmissão de
@@ -10,22 +10,19 @@
 //! passam por aqui — nem o TCP dos servidores de voz, que não decide região
 //! nenhuma, sai do país.
 
-#![windows_subsystem = "windows"]
-
 mod discord;
+mod linux;
 mod pac;
 mod pool;
 mod processos;
 mod routing;
 mod sessao;
 mod socks;
-mod windows;
+
+use linux as os;
 
 use anyhow::{Context, Result};
 use std::{ffi::OsStr, path::PathBuf, process::Command, time::Duration};
-
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 const PORTA_SOCKS: u16 = 9250;
 const PORTA_PAC: u16 = 9251;
@@ -38,13 +35,13 @@ const INTERVALO_VIGIA: Duration = Duration::from_secs(1);
 #[derive(Debug, PartialEq, Eq)]
 struct OpcoesInstalar {
     reiniciar_discord: bool,
-    criar_run_legado: bool,
+    criar_autostart: bool,
 }
 
 fn opcoes_instalar(args: &[String]) -> OpcoesInstalar {
     OpcoesInstalar {
         reiniciar_discord: !args.iter().any(|arg| arg == "--sem-reiniciar"),
-        criar_run_legado: !args.iter().any(|arg| arg == "--sem-autostart"),
+        criar_autostart: !args.iter().any(|arg| arg == "--sem-autostart"),
     }
 }
 
@@ -57,8 +54,10 @@ fn url_pac() -> String {
 }
 
 pub fn pasta_dados() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".into());
-    PathBuf::from(base).join("FolDiscord")
+    let base = std::env::var("XDG_DATA_HOME")
+        .or_else(|_| std::env::var("HOME").map(|h| format!("{h}/.local/share")))
+        .unwrap_or_else(|_| ".".into());
+    PathBuf::from(base).join("fol-discord")
 }
 
 pub fn caminho_log() -> PathBuf {
@@ -66,20 +65,11 @@ pub fn caminho_log() -> PathBuf {
 }
 
 /// Marcador escrito pelo serviço quando a piscina tem proxies utilizáveis.
-/// Um arquivo, e não uma linha no log: o log sobrevive entre instalações, e
-/// procurar texto nele fazia a instalação seguinte se declarar pronta na hora,
-/// reiniciando o Discord antes de haver qualquer proxy validado.
 pub fn caminho_marcador() -> PathBuf {
     pasta_dados().join("pronto")
 }
 
-/// Instante da última passada de manutenção da piscina, em milissegundos de
-/// época. É o que a janela mostra em "Última checagem".
-///
-/// Antes só o botão "Verificar agora" escrevia aqui, então quem nunca clicava
-/// via um travessão para sempre — mesmo com o serviço checando a piscina de
-/// cinco em cinco minutos desde o boot. O serviço é quem sabe a hora da
-/// checagem, então é ele quem carimba.
+/// Instante da última passada de manutenção da piscina, em milissegundos de época.
 pub fn caminho_ultima_validacao() -> PathBuf {
     pasta_dados().join("ultima-validacao-ms")
 }
@@ -95,33 +85,20 @@ fn milissegundos_agora() -> u128 {
         .as_millis()
 }
 
-/// Carimba a passada de manutenção que acabou de terminar. Um disco ocupado
-/// não pode derrubar o laço: no pior caso a janela mostra a checagem anterior.
 fn registrar_checagem_em(caminho: &std::path::Path, instante: u128) {
     let _ = std::fs::create_dir_all(caminho.parent().unwrap_or(caminho));
     let _ = std::fs::write(caminho, format!("{instante}\n"));
 }
 
 fn caminho_instalado() -> PathBuf {
-    pasta_dados().join("fol-discord.exe")
+    pasta_dados().join("fol-discord")
 }
 
-/// Todo processo auxiliar nasce sem console. O núcleo é executado tanto pelo
-/// PowerShell quanto pela janela; neste último caso, ferramentas como
-/// `taskkill` criariam uma caixa preta curta se não receberem esta flag.
 fn comando_oculto(programa: impl AsRef<OsStr>) -> Command {
-    let mut comando = Command::new(programa);
-    #[cfg(windows)]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        comando.creation_flags(CREATE_NO_WINDOW);
-    }
-    comando
+    Command::new(programa)
 }
 
 fn main() -> Result<()> {
-    anexar_console();
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let comando = args
         .iter()
@@ -146,7 +123,7 @@ fn ajuda() {
     println!(
         "\nfol-discord {}\n\n\
          Uso:\n  \
-         fol-discord instalar      liga a correção, reinicia o Discord e sobe com o Windows\n  \
+         fol-discord instalar      liga a correção, reinicia o Discord e sobe com o sistema\n  \
          fol-discord desinstalar   remove tudo, sem deixar rastro\n  \
          fol-discord status        mostra o estado atual\n  \
          fol-discord reiniciar-discord fecha e abre só o Discord\n  \
@@ -154,7 +131,7 @@ fn ajuda() {
          Opções:\n  \
          --sem-reiniciar           não mexe no Discord aberto; a correção vale na\n                            \
          próxima vez que você abrir\n  \
-         --sem-autostart           não cria a entrada Run legada (uso do setup)\n  \
+         --sem-autostart           não cria a entrada de inicialização automática\n  \
          --manter-arquivos         limpa a configuração sem apagar a pasta instalada\n",
         env!("CARGO_PKG_VERSION")
     );
@@ -166,26 +143,20 @@ fn instalar(opcoes: OpcoesInstalar) -> Result<()> {
 
     let atual = std::env::current_exe()?;
     if atual != destino {
-        // Se já havia uma cópia rodando, ela precisa sair antes de ser trocada.
         encerrar_outras_instancias();
         std::fs::copy(&atual, &destino).context("copiando o executável")?;
     }
 
-    if opcoes.criar_run_legado {
-        windows::ativar_autostart(&format!("\"{}\" rodar", destino.display()))
+    if opcoes.criar_autostart {
+        os::ativar_autostart(&format!("\"{}\" rodar", destino.display()))
             .context("registrando o autostart")?;
     }
-    windows::ativar_pac(&url_pac()).context("ligando o proxy automático")?;
-    let _ = windows::adicionar_ao_path(&pasta_dados().display().to_string());
+    os::ativar_pac(&url_pac()).context("ligando o proxy automático")?;
+    let _ = os::adicionar_ao_path(&pasta_dados().display().to_string());
 
-    // O marcador é de quem está subindo agora, não da instalação anterior — e
-    // a mesma regra vale para a hora da última checagem: mostrar "há 3 d" numa
-    // instalação recém-feita seria a janela mentindo sobre si mesma.
     let _ = std::fs::remove_file(caminho_marcador());
     let _ = std::fs::remove_file(caminho_ultima_validacao());
 
-    // Mesmo o processo principal é criado sem console: o instalador pode ter
-    // sido chamado pela janela, pelo autostart ou pelo PowerShell.
     comando_oculto(&destino)
         .arg("rodar")
         .stdout(std::process::Stdio::null())
@@ -193,8 +164,6 @@ fn instalar(opcoes: OpcoesInstalar) -> Result<()> {
         .spawn()
         .context("subindo o serviço")?;
 
-    // A piscina precisa de alguns segundos para validar os primeiros proxies.
-    // Reiniciar o Discord antes disso o faria abrir sem correção nenhuma.
     print!("Validando proxies");
     let _ = std::io::Write::flush(&mut std::io::stdout());
     let mut pronta = false;
@@ -218,10 +187,10 @@ fn instalar(opcoes: OpcoesInstalar) -> Result<()> {
     println!("  log        : {}", caminho_log().display());
     println!(
         "  autostart  : {}",
-        if opcoes.criar_run_legado {
-            "sim"
+        if opcoes.criar_autostart {
+            "sim (systemd user service + XDG)"
         } else {
-            "gerenciado pela interface"
+            "desativado"
         }
     );
     println!("  PAC        : {}", url_pac());
@@ -245,23 +214,21 @@ fn instalar(opcoes: OpcoesInstalar) -> Result<()> {
 }
 
 fn desinstalar(manter_arquivos: bool) -> Result<()> {
-    windows::validar_autostart_do_fol(&caminho_instalado())?;
-    windows::desativar_pac().context("devolvendo o proxy automático")?;
-    windows::desativar_autostart(&caminho_instalado()).context("removendo o autostart")?;
-    let _ = windows::remover_do_path(&pasta_dados().display().to_string());
+    os::validar_autostart_do_fol(&caminho_instalado())?;
+    os::desativar_pac().context("devolvendo o proxy automático")?;
+    os::desativar_autostart(&caminho_instalado()).context("removendo o autostart")?;
+    let _ = os::remover_do_path(&pasta_dados().display().to_string());
     encerrar_outras_instancias();
 
-    // Fecha o Discord sem reabrir: reabrir agora, com o proxy já desligado, é
-    // exatamente o que o usuário quer — mas deixamos a escolha com ele.
     let estava_aberto = discord::encerrar_se_aberto();
     if !manter_arquivos {
         let _ = std::fs::remove_dir_all(pasta_dados());
     }
 
     println!(
-        "{} O proxy automático do Windows voltou ao que era antes.",
+        "{} O proxy automático do sistema voltou ao que era antes.",
         if manter_arquivos {
-            "Configuração removida; os arquivos foram preservados para o setup."
+            "Configuração removida; os arquivos foram preservados."
         } else {
             "Removido."
         }
@@ -277,21 +244,18 @@ fn desinstalar(manter_arquivos: bool) -> Result<()> {
 fn status() -> Result<()> {
     println!("\nfol-discord {}\n", env!("CARGO_PKG_VERSION"));
     println!("  instalado  : {}", sim_nao(caminho_instalado().exists()));
-    println!("  autostart  : {}", sim_nao(windows::autostart_ativo()));
-    println!("  PAC ligado : {}", sim_nao(windows::pac_ativo(&url_pac())));
+    println!("  autostart  : {}", sim_nao(os::autostart_ativo()));
+    println!("  PAC ligado : {}", sim_nao(os::pac_ativo(&url_pac())));
     println!("  rodando    : {}", sim_nao(porta_ocupada(PORTA_SOCKS)));
     println!(
         "  no PATH    : {}",
-        sim_nao(windows::path_ativo(&pasta_dados().display().to_string()))
+        sim_nao(os::path_ativo(&pasta_dados().display().to_string()))
     );
     println!("  proxies    : {}", sim_nao(piscina_pronta()));
     println!("  log        : {}", caminho_log().display());
     Ok(())
 }
 
-/// Reinicia somente o Discord. Não passa pela instalação nem aguarda a
-/// validação da piscina: a interface usa este caminho quando o serviço já
-/// está em execução.
 fn reiniciar_discord() -> Result<()> {
     match discord::reiniciar()? {
         true => println!("Discord reiniciado."),
@@ -300,11 +264,9 @@ fn reiniciar_discord() -> Result<()> {
     Ok(())
 }
 
-/// Encerra cópias antigas do serviço — e só elas. O filtro por PID existe
-/// porque o instalador tem o mesmo nome de imagem e mataria a si próprio.
 fn encerrar_outras_instancias() {
     let eu = std::process::id();
-    let antigas: Vec<u32> = processos::pids_por_nome("fol-discord.exe")
+    let antigas: Vec<u32> = processos::pids_por_nome("fol-discord")
         .into_iter()
         .filter(|pid| *pid != eu)
         .collect();
@@ -327,12 +289,6 @@ fn porta_ocupada(porta: u16) -> bool {
     .is_ok()
 }
 
-/// Vigia a janela de abertura, num fio próprio.
-///
-/// Fica fora do runtime de propósito: ler a lista de processos do Windows é
-/// uma chamada bloqueante, e ela não tem por que disputar uma thread com o
-/// tráfego do Discord. Todo o estado da sessão é síncrono, então o fio dá
-/// conta sozinho.
 fn vigiar_sessao(sessao: std::sync::Arc<sessao::Sessao>, piscina: pool::Pool) {
     std::thread::spawn(move || loop {
         let agora = std::time::Instant::now();
@@ -348,11 +304,6 @@ fn vigiar_sessao(sessao: std::sync::Arc<sessao::Sessao>, piscina: pool::Pool) {
         }
 
         if sessao.avaliar(agora, piscina.quantidade() > 0) {
-            // A região já está gravada na sessão. Daqui em diante o Discord
-            // fala direto, e quem ficou preso no exterior acabou de cair para
-            // reconectar pelo caminho curto — a VPN desligou. A duração conta
-            // desde que a janela armou, e ajuda a ler o log sem contar linha
-            // por linha.
             let duracao = sessao.armada_ha(agora).as_secs();
             socks::log::linha(&format!(
                 "sessão aberta após {duracao} s; o Discord volta a falar direto"
@@ -396,25 +347,14 @@ fn rodar() -> Result<()> {
                         }
                     }
 
-                    // O marcador reflete o estado real da piscina: some quando
-                    // ela seca, para que `status` não minta.
                     if p.quantidade() > 0 {
                         let _ = std::fs::write(caminho_marcador(), b"");
                     } else {
                         let _ = std::fs::remove_file(caminho_marcador());
                     }
 
-                    // A checagem aconteceu — inclusive quando não achou nada.
-                    // Um travessão em "Última checagem" tem que querer dizer
-                    // "o serviço não olhou", não "o serviço olhou e falhou".
                     registrar_checagem_em(&caminho_ultima_validacao(), milissegundos_agora());
 
-                    // A próxima passada é daqui a cinco minutos — a menos que a
-                    // piscina seque antes. Com todo o Discord saindo pelo
-                    // exterior na abertura, um proxy ruim é rebaixado em duas
-                    // conexões, e esperar cinco minutos com a piscina vazia
-                    // seria cinco minutos de janela aberta sem para onde
-                    // desviar.
                     tokio::select! {
                         _ = tokio::time::sleep(INTERVALO_MANUTENCAO) => {}
                         _ = p.esperar_secar() => {
@@ -435,59 +375,12 @@ fn rodar() -> Result<()> {
     })
 }
 
-/// Compilado como aplicativo de janela para não piscar console no autostart.
-/// Quando chamado de um terminal, adota o console de quem chamou — e reabre
-/// as saídas padrão apontando para ele, senão `println!` escreveria no vazio.
-fn anexar_console() {
-    #[cfg(windows)]
-    unsafe {
-        use windows_sys::Win32::{
-            Foundation::{GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE},
-            Storage::FileSystem::{
-                CreateFileW, FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_SHARE_WRITE,
-                OPEN_EXISTING,
-            },
-            System::Console::{
-                AttachConsole, GetStdHandle, SetStdHandle, ATTACH_PARENT_PROCESS,
-                STD_ERROR_HANDLE, STD_OUTPUT_HANDLE,
-            },
-        };
-
-        // Se quem nos chamou já entregou uma saída — um pipe, um arquivo, um
-        // `>` —, ela é a saída correta. Sobrescrevê-la pelo console faria
-        // `fol-discord status > arquivo` gravar nada.
-        let ja_temos = GetStdHandle(STD_OUTPUT_HANDLE);
-        if !ja_temos.is_null() && ja_temos != INVALID_HANDLE_VALUE {
-            return;
-        }
-
-        if AttachConsole(ATTACH_PARENT_PROCESS) == 0 {
-            return; // sem terminal chamador: rodando pelo autostart
-        }
-
-        let nome: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
-        let saida = CreateFileW(
-            nome.as_ptr(),
-            GENERIC_READ | GENERIC_WRITE,
-            FILE_SHARE_READ | FILE_SHARE_WRITE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
-        );
-        if saida != INVALID_HANDLE_VALUE {
-            SetStdHandle(STD_OUTPUT_HANDLE, saida);
-            SetStdHandle(STD_ERROR_HANDLE, saida);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn setup_da_interface_instala_o_servico_sem_run_legado() {
+    fn setup_instala_o_servico() {
         assert_eq!(
             opcoes_instalar(&[
                 "instalar".into(),
@@ -496,18 +389,18 @@ mod tests {
             ]),
             OpcoesInstalar {
                 reiniciar_discord: false,
-                criar_run_legado: false,
+                criar_autostart: false,
             },
         );
     }
 
     #[test]
-    fn cli_sem_novas_opcoes_mantem_o_autostart_legado() {
+    fn cli_sem_opcoes_ativa_tudo() {
         assert_eq!(
             opcoes_instalar(&["instalar".into()]),
             OpcoesInstalar {
                 reiniciar_discord: true,
-                criar_run_legado: true,
+                criar_autostart: true,
             },
         );
     }
@@ -522,16 +415,12 @@ mod tests {
     }
 
     #[test]
-    fn a_manutencao_carimba_a_hora_que_a_janela_le() {
+    fn a_manutencao_carimba_a_hora() {
         let diretorio = tempfile::tempdir().unwrap();
         let caminho = diretorio.path().join("sub").join("ultima-validacao-ms");
 
-        // A pasta ainda não existe: o carimbo tem que criá-la, senão a
-        // primeira checagem depois de uma instalação limpa se perde.
         registrar_checagem_em(&caminho, 1_725_000_123_456);
 
-        // O mesmo formato que a ponte da janela sabe ler: milissegundos de
-        // época em texto, com a quebra de linha final.
         assert_eq!(
             std::fs::read_to_string(&caminho).unwrap(),
             "1725000123456\n"
@@ -543,14 +432,6 @@ mod tests {
                 .parse::<u64>()
                 .unwrap(),
             1_725_000_123_456
-        );
-    }
-
-    #[test]
-    fn a_janela_e_o_servico_apontam_para_o_mesmo_arquivo_de_checagem() {
-        assert_eq!(
-            caminho_ultima_validacao(),
-            pasta_dados().join("ultima-validacao-ms"),
         );
     }
 }
